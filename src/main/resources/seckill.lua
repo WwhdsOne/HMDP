@@ -3,6 +3,8 @@
 local userId = ARGV[2]
 -- 1.2 获取优惠卷ID
 local voucherId = ARGV[1]
+-- 1.3 订单id
+local orderId = ARGV[3]
 
 -- 2. 数据key
 -- 2.1 库存key
@@ -21,5 +23,9 @@ if (redis.call("sismember",orderKey,userId) == 1) then
 end
 -- 3.3 减库存
 redis.call("decr", stockKey)
+-- 3.4 下单保存用户信息
 redis.call("sadd", orderKey, userId)
+--3.5 发送到消息队列
+redis.call('xadd','stream.orders','*','userId',userId,'voucherId',voucherId,'id',orderId)
+
 return 0
