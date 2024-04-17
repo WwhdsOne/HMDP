@@ -5,6 +5,8 @@ import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
@@ -12,8 +14,14 @@ import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisData;
+import com.hmdp.utils.SystemConstants;
 import io.netty.util.internal.StringUtil;
+import org.springframework.data.geo.Distance;
+import org.springframework.data.geo.GeoResult;
+import org.springframework.data.geo.GeoResults;
+import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.domain.geo.GeoReference;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -21,15 +29,17 @@ import org.springframework.util.StringUtils;
 import javax.annotation.Resource;
 
 import java.time.LocalDateTime;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static com.hmdp.utils.RedisConstants.*;
 
 /**
  * <p>
- *  服务实现类
+ * 服务实现类
  * </p>
  *
  * @author 虎哥
@@ -52,13 +62,13 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         //Shop shop = queryWithMuTex(id);
         //3. 逻辑过期解决缓存击穿
         Shop shop = cacheClient.queryWithLogicExpire(CACHE_SHOP_KEY, id, Shop.class, this::getById, 5L, TimeUnit.SECONDS);
-        if(shop == null){
+        if ( shop == null ) {
             return Result.fail("商铺不存在");
         }
         return Result.ok(shop);
     }
 
-    public void saveShop2Redis(Long id,Long expireSeconds) throws InterruptedException {
+    public void saveShop2Redis(Long id, Long expireSeconds) throws InterruptedException {
         //1. 从数据库中查询商铺信息
         Shop shop = getById(id);
         //模拟查询数据库耗时
@@ -188,26 +198,108 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 //        return shop;
 //    }
 
-    private Boolean tryLock(String key){
+    private Boolean tryLock(String key) {
         Boolean b = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", LOCK_SHOP_TTL, TimeUnit.SECONDS);
         return BooleanUtil.isTrue(b);
     }
 
-    private void unlock(String key){
+    private void unlock(String key) {
         stringRedisTemplate.delete(key);
     }
 
+//    //更新商铺信息
+//    //先更新数据库再删除缓存
+//    @Override
+//    @Transactional
+//    public Result update(Shop shop) {
+//        Long id = shop.getId();
+//        if ( id == null ) {
+//            return Result.fail("商铺id不能为空");
+//        }
+//        //1. 更新数据库
+//        updateById(shop);
+//        //2. 更新成功，删除redis缓存
+//        stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
+//        //3. 延时三到五秒，再次删除缓存
+//        try {
+//            Thread.sleep(3000);
+//        } catch (InterruptedException e) {
+//            e.printStackTrace();
+//        }
+//        return Result.ok();
+//    }
+
+    //更新商铺信息
+    //延时双删
     @Override
     @Transactional
     public Result update(Shop shop) {
         Long id = shop.getId();
-        if(id == null){
+        if ( id == null ) {
             return Result.fail("商铺id不能为空");
         }
-        //1. 更新数据库
-        updateById(shop);
-        //2. 更新成功，删除redis缓存
+        //1. 第一次删除redis缓存
         stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
+        //2. 更新数据库
+        updateById(shop);
+        //3. 开启额外线程，延时一到三秒，再次删除缓存
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(1000);
+                stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        });
+        t.start();
         return Result.ok();
+    }
+
+    @Override
+    public Result queryByShopType(Integer typeId, Integer current, Double x, Double y) {
+        //1. 判断是否根据坐标查询
+        if(x == null || y == null){
+            Page<Shop> page = query()
+                    .eq("type_id", typeId)
+                    .page(new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE));
+            return Result.ok(page);
+        }
+        //2. 计算分页参数
+        int start = (current - 1) * SystemConstants.DEFAULT_PAGE_SIZE;
+        int end = current * SystemConstants.DEFAULT_PAGE_SIZE ;
+        //3. 查询redis按照距离排序，分页，结果：shopId, distance
+        String key = SHOP_GEO_KEY + typeId;
+        GeoResults<RedisGeoCommands.GeoLocation<String>> results = stringRedisTemplate.opsForGeo().search(
+                key,
+                GeoReference.fromCoordinate(x, y),
+                new Distance(5000),
+                RedisGeoCommands.GeoSearchCommandArgs.newGeoSearchArgs().includeDistance().limit(end)
+        );
+        //4. 解析出ID
+        if(results == null || results.getContent().isEmpty()){
+            return Result.ok(Collections.emptyList());
+        }
+        List<GeoResult<RedisGeoCommands.GeoLocation<String>>> content = results.getContent();
+        //没有下一页了
+        if(content.size() <= start){
+            return Result.ok(Collections.emptyList());
+        }
+        List<String> ids = new ArrayList<>(content.size());
+        Map<String,Distance> map = new HashMap<>(content.size());
+        content.stream().skip(start).forEach(geoResult -> {
+            // 获取Key
+            String id = geoResult.getContent().getName();
+            ids.add(id);
+            // 获取距离
+            Distance distance = geoResult.getDistance();
+            map.put(id, distance);
+        });
+        //5. 根据ID查询数据库商铺信息
+        String idsStr = StrUtil.join(",", ids);
+        List<Shop> shops = query().in("id",ids).last("order by field(id," + idsStr + ")").list();
+        for ( Shop shop : shops ) {
+            shop.setDistance(map.get(shop.getId().toString()).getValue());
+        }
+        return Result.ok(shops);
     }
 }
