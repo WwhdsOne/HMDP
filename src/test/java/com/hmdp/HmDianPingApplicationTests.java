@@ -10,12 +10,14 @@ import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 import javax.annotation.Resource;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static com.hmdp.utils.RedisConstants.SHOP_GEO_KEY;
@@ -90,4 +92,35 @@ class HmDianPingApplicationTests {
         System.out.println(hl2);
     }
 
+//    @Test
+//    void rabbitmqSend() throws IOException {
+//        RabbitMQTest.send();
+//    }
+//
+//    @Test
+//    void rabbitmqReceiveBoth() throws IOException {
+//        ExecutorService executorService = Executors.newFixedThreadPool(2);
+//
+//        executorService.submit(() -> {
+//            try {
+//                RabbitMQTest.receiveOne();
+//            } catch (IOException e) {
+//                e.printStackTrace();
+//            }
+//        });
+//
+//        executorService.submit(() -> {
+//            try {
+//                RabbitMQTest.receiveTwo();
+//            } catch (IOException e) {
+//                e.printStackTrace();
+//            }
+//        });
+//        try {
+//            // 阻塞当前线程，直到所有任务都已完成执行，或者超出了指定的等待时间
+//            executorService.awaitTermination(Long.MAX_VALUE, TimeUnit.MINUTES);
+//        } catch (InterruptedException e) {
+//            e.printStackTrace();
+//        }
+//    }
 }

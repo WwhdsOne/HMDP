@@ -4,6 +4,7 @@ import cn.hutool.core.bean.BeanUtil;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.SeckillVoucher;
 import com.hmdp.entity.VoucherOrder;
+import com.hmdp.entity.VoucherOrderMsg;
 import com.hmdp.mapper.VoucherOrderMapper;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
@@ -11,9 +12,15 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
+import com.rabbitmq.client.Channel;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.rabbit.annotation.Queue;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.connection.stream.*;
@@ -24,6 +31,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
+import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Collections;
@@ -40,7 +48,7 @@ import java.util.stream.Stream;
  * @author 虎哥
  * @since 2021-12-22
  */
-@Service
+@Service("voucherOrderServiceWithRedisStream")
 @Slf4j
 public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, VoucherOrder> implements IVoucherOrderService {
 
@@ -55,6 +63,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Resource
     private RedissonClient redissonClient;
+
+    @Resource
+    private RabbitTemplate rabbitTemplate;
+
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
 
@@ -72,6 +84,25 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
     private IVoucherOrderService proxy;
+
+    @RabbitListener(queuesToDeclare = @Queue("Voucher_SecKill"), ackMode = "MANUAL")
+    public void processVoucherOrderMsg(VoucherOrderMsg message, Channel channel, Message msg) {
+        try {
+            log.info("接收到消息:{}", message);
+            // 处理消息...
+
+            // 手动确认消息
+            channel.basicAck(msg.getMessageProperties().getDeliveryTag(), false);
+        } catch (Exception e) {
+            log.error("处理消息时发生异常.", e);
+            try {
+                // 如果处理消息时发生异常，那么拒绝消息并将其放回队列
+                channel.basicNack(msg.getMessageProperties().getDeliveryTag(), false, true);
+            } catch (IOException ioException) {
+                throw RabbitExceptionTranslator.convertRabbitAccessException(ioException);
+            }
+        }
+    }
 
     private class VoucherOrderHandler implements Runnable {
         String queueName = "stream.orders";
@@ -140,7 +171,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
     }
     //阻塞队列中处理优惠卷
-    private void handleVoucherOrder(VoucherOrder voucherOrder) {
+    public void handleVoucherOrder(VoucherOrder voucherOrder) {
         //1. 获取锁对象
         Long userId = voucherOrder.getUserId();
         //2. 创建锁对象
