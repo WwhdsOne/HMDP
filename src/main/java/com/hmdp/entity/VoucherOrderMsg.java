@@ -20,4 +20,5 @@ import java.io.Serializable;
 public class VoucherOrderMsg implements Serializable {
     private Long voucherId;
     private Long userId;
+    private Long orderId;
 }
